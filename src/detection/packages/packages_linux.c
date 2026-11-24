@@ -574,6 +574,11 @@ static void getPackageCounts(FFstrbuf* baseDir, FFPackagesResult* packageCounts,
     if (FF_PACKAGES_IS_ENABLED(options, CARDS)) {
         packageCounts->cards += getNumElements(baseDir, "/var/lib/pkg/DB", true);
     }
+
+    if (FF_PACKAGES_IS_ENABLED(options, ZETA)) {
+        packageCounts->zeta += getNumElements(baseDir, "/var/db/zeta/packages", true);
+        packageCounts->zeta += getNumElements(baseDir, "/var/db/zeta/dependencies", true);
+    }
 }
 
 static void getPackageCountsRegular(FFstrbuf* baseDir, FFPackagesResult* packageCounts, FFPackagesOptions* options) {
