@@ -1,11 +1,10 @@
 #include "detection/gpu/gpu.h"
+#include "common/debug.h"
 #include "common/io.h"
-#include "common/FFstrbuf.h"
+#include "common/properties.h"
 #include "common/strutil.h"
-#include "modules/gpu/option.h"
 
 #include <inttypes.h>
-#include <stdint.h>
 
 static bool detectDriverFromSysfs(FFstrbuf* result, FFstrbuf* pciDir, FFstrbuf* buffer, [[maybe_unused]] const char* drmKey) {
     uint32_t pciDirLength = pciDir->length;
@@ -57,6 +56,7 @@ static bool detectDriverFromSysfs(FFstrbuf* result, FFstrbuf* pciDir, FFstrbuf* 
     sprintf(path, "/sys/class/drm/%s/device/drm", drmCardKey);
     FF_AUTO_CLOSE_DIR DIR* dirp = opendir(path);
     if (!dirp) {
+        FF_DEBUG("opendir(%s) failed: %s", path, strerror(errno));
         return "Failed to open `/sys/class/drm/{drmCardKey}/device/drm`";
     }
 
@@ -68,6 +68,7 @@ static bool detectDriverFromSysfs(FFstrbuf* result, FFstrbuf* pciDir, FFstrbuf* 
             return nullptr;
         }
     }
+    FF_DEBUG("Failed to find render device");
     return "Failed to find render device";
 }
 
@@ -214,6 +215,7 @@ static const char* drmDetectIntelSpecific(FFGPUResult* gpu, const char* drmKey, 
     ffStrbufAppendS(buffer, drmKey);
     FF_AUTO_CLOSE_FD int fd = open(buffer->chars, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
+        FF_DEBUG("open(%s) failed: %s", buffer->chars, strerror(errno));
         return "Failed to open drm device";
     }
 
@@ -222,6 +224,7 @@ static const char* drmDetectIntelSpecific(FFGPUResult* gpu, const char* drmKey, 
     } else if (ffStrbufEqualS(&gpu->driver, "i915")) {
         return ffDrmDetectI915(gpu, fd);
     }
+    FF_DEBUG("Unknown Intel GPU driver");
     return "Unknown Intel GPU driver";
 }
 
@@ -257,6 +260,7 @@ static const char* drmDetectNouveauSpecific(FFGPUResult* gpu, const char* drmKey
     ffStrbufAppendS(buffer, drmKey);
     FF_AUTO_CLOSE_FD int fd = open(buffer->chars, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
+        FF_DEBUG("open(%s) failed: %s", buffer->chars, strerror(errno));
         return "Failed to open drm device";
     }
 
@@ -331,11 +335,70 @@ static inline uint16_t pcieWidthToLanes(const FFstrbuf* buffer) {
     return FF_GPU_PCIE_SPEED_UNSET;
 }
 
+static bool parseModelName(const char* data, const char* key, bool stripVendorPrefix, FFstrbuf* name) {
+    ffStrbufClear(name);
+    if (!ffParsePropLines(data, key, name) || !name->length) {
+        return false;
+    }
+
+    ffStrbufDecodeHexEscapeSequences(name); // udev hex-escapes characters that are not allowed in property values
+    ffStrbufTrimSpace(name);
+
+    // hwdb names have the form `Codename [Marketing Name]`. Reduce them exactly like
+    // ffGPUParsePciIdsFile() does, so displaying the name does not change with the source.
+    if (name->length > 1 && name->chars[name->length - 1] == ']') {
+        const char* openingBracket = memrchr(name->chars, '[', name->length - 1);
+        if (openingBracket) {
+            ffStrbufSubstrAfter(name, (uint32_t) (openingBracket - name->chars));
+            ffStrbufSubstrBefore(name, name->length - 1);
+        }
+    }
+
+    // The driver repeats the vendor in its own model line. Dropping it keeps the pci.ids
+    // shape and lets ffGPUDetectTypeByVendorAndName() see the product family prefix.
+    if (stripVendorPrefix && ffStrbufStartsWithIgnCaseS(name, "NVIDIA ")) {
+        ffStrbufSubstrAfter(name, (uint32_t) strlen("NVIDIA ") - 1); // excludes the index itself
+    }
+
+    ffStrbufTrimSpace(name);
+    return name->length > 0;
+}
+
+static bool nameFromFile(const FFstrbuf* path, const char* key, bool stripVendorPrefix, FFstrbuf* buffer, FFstrbuf* name) {
+    if (!ffReadFileBuffer(path->chars, buffer) || !parseModelName(buffer->chars, key, stripVendorPrefix, name)) {
+        return false;
+    }
+    FF_DEBUG("GPU name resolved from %s: %s", path->chars, name->chars);
+    return true;
+}
+
+// The driver and udev already resolved the model name at probe / boot time. Only `Model:` is
+// consumed: the sibling `power` file goes through the RM and can wake a GPU suspended in runtime D3.
+static bool resolveNameFromFiles(const char* pciPath, bool isNvidia, FFstrbuf* buffer, FFstrbuf* name) {
+    FF_STRBUF_AUTO_DESTROY path = ffStrbufCreateA(128);
+
+    if (isNvidia) {
+        ffStrbufSetF(&path, "/proc/driver/nvidia/gpus/%s/information", pciPath);
+        if (nameFromFile(&path, "Model:", true, buffer, name)) {
+            return true;
+        }
+    }
+
+    ffStrbufSetF(&path, "/run/udev/data/+pci:%s", pciPath);
+    if (nameFromFile(&path, "E:ID_MODEL_FROM_DATABASE=", false, buffer, name)) {
+        return true;
+    }
+
+    ffStrbufClear(name);
+    return false;
+}
+
 static const char* detectPci(const FFGPUOptions* options, FFlist* gpus, FFstrbuf* buffer, FFstrbuf* deviceDir, const char* drmKey) {
     const uint32_t drmDirPathLength = deviceDir->length;
     uint32_t vendorId, deviceId, subVendorId, subDeviceId;
     uint8_t classId, subclassId;
     if (sscanf(buffer->chars + strlen("pci:"), "v%8" SCNx32 "d%8" SCNx32 "sv%8" SCNx32 "sd%8" SCNx32 "bc%2" SCNx8 "sc%2" SCNx8, &vendorId, &deviceId, &subVendorId, &subDeviceId, &classId, &subclassId) != 6) {
+        FF_DEBUG("Failed to parse pci modalias");
         return "Failed to parse pci modalias";
     }
 
@@ -348,6 +411,7 @@ static const char* detectPci(const FFGPUOptions* options, FFlist* gpus, FFstrbuf
     if (drmKey) {
         ssize_t pathLength = readlink(deviceDir->chars, pciPath, ARRAY_SIZE(pciPath) - 1);
         if (pathLength <= 0) {
+            FF_DEBUG("readlink(%s) failed: %s", deviceDir->chars, strerror(errno));
             return "Unable to get PCI device path";
         }
         pciPath[pathLength] = '\0';
@@ -365,6 +429,7 @@ static const char* detectPci(const FFGPUOptions* options, FFlist* gpus, FFstrbuf
 
     uint32_t pciDomain, pciBus, pciDevice, pciFunc;
     if (sscanf(pPciPath, "%" SCNx32 ":%" SCNx32 ":%" SCNx32 ".%" SCNx32, &pciDomain, &pciBus, &pciDevice, &pciFunc) != 4) {
+        FF_DEBUG("Invalid PCI device path");
         return "Invalid PCI device path";
     }
 
@@ -456,7 +521,12 @@ static const char* detectPci(const FFGPUOptions* options, FFlist* gpus, FFstrbuf
     }
 
     if (gpu->name.length == 0) {
-        ffGPUFillVendorAndName(subclassId, (uint16_t) vendorId, (uint16_t) deviceId, gpu);
+        // Stop at the first hit; unknown vendors are left to pci.ids, which also fills in `vendor`.
+        bool resolved = gpu->vendor.length > 0 &&
+            resolveNameFromFiles(pPciPath, gpu->vendor.chars == FF_GPU_VENDOR_NAME_NVIDIA, buffer, &gpu->name);
+        if (!resolved) {
+            ffGPUFillVendorAndName(subclassId, (uint16_t) vendorId, (uint16_t) deviceId, gpu);
+        }
     }
 
     ffGPUDetectTypeByVendorAndName(gpu);
@@ -517,6 +587,7 @@ static const char* detectPci(const FFGPUOptions* options, FFlist* gpus, FFstrbuf
 static const char* detectOf(FFlist* gpus, FFstrbuf* buffer, FFstrbuf* drmDir, const char* drmKey) {
     char compatible[256]; // vendor,model-name
     if (sscanf(buffer->chars + strlen("of:"), "NgpuT%*[^C]C%255[^C]", compatible) != 1) {
+        FF_DEBUG("Failed to parse of modalias or not a GPU device");
         return "Failed to parse of modalias or not a GPU device";
     }
 
@@ -573,6 +644,7 @@ static const char* drmDetectGPUs(const FFGPUOptions* options, FFlist* gpus) {
 
     FF_AUTO_CLOSE_DIR DIR* dir = opendir(drmDir.chars);
     if (dir == nullptr) {
+        FF_DEBUG("opendir(%s) failed: %s", drmDir.chars, strerror(errno));
         return "Failed to open `/sys/class/drm/`";
     }
 
@@ -612,6 +684,7 @@ static const char* pciDetectGPUs(const FFGPUOptions* options, FFlist* gpus) {
 
     FF_AUTO_CLOSE_DIR DIR* dirp = opendir(pciDirPath);
     if (dirp == nullptr) {
+        FF_DEBUG("opendir(%s) failed: %s", pciDirPath, strerror(errno));
         return "Failed to open `/sys/bus/pci/devices/`";
     }
 

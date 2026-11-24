@@ -181,6 +181,26 @@ static const FFlogo A[] = {
         .colorTitle = FF_COLOR_FG_CYAN,
     },
     #endif
+    #ifdef FASTFETCH_DATATEXT_LOGO_ALT_ATOMIC
+    // ALT Atomic
+    {
+        .names = { "alt-atomic" },
+        .lines = FASTFETCH_DATATEXT_LOGO_ALT_ATOMIC,
+        .colors = {
+            FF_COLOR_FG_RGB "79;157;207",
+            FF_COLOR_FG_RGB "113;174;213",
+            FF_COLOR_FG_RGB "61;120;158",
+            FF_COLOR_FG_RGB "244;250;252",
+            FF_COLOR_FG_RGB "207;230;243",
+            FF_COLOR_FG_RGB "29;58;76",
+            FF_COLOR_FG_RGB "213;201;181",
+            FF_COLOR_FG_RGB "150;180;193",
+            FF_COLOR_FG_RGB "161;204;230",
+        },
+        .colorKeys = FF_COLOR_FG_RGB "80;157;207",
+        .colorTitle = FF_COLOR_FG_RGB "255;209;164",
+    },
+    #endif
     #ifdef FASTFETCH_DATATEXT_LOGO_ALTLINUX
     // ALTLinux
     {
@@ -595,6 +615,17 @@ static const FFlogo A[] = {
         .colorTitle = FF_COLOR_FG_DEFAULT,
     },
     #endif
+    #ifdef FASTFETCH_DATATEXT_LOGO_ARMADA
+    // ArmadaOS
+    {
+        .names = { "Armada" },
+        .lines = FASTFETCH_DATATEXT_LOGO_ARMADA,
+        .colors = {
+            FF_COLOR_FG_DEFAULT,
+            FF_COLOR_FG_BLUE,
+        },
+    },
+    #endif
     #ifdef FASTFETCH_DATATEXT_LOGO_ARMBIAN
     // Armbian
     {
@@ -638,6 +669,18 @@ static const FFlogo A[] = {
     {
         .names = { "artix2" },
         .lines = FASTFETCH_DATATEXT_LOGO_ARTIX2,
+        .colors = {
+            FF_COLOR_FG_CYAN,
+        },
+        .colorKeys = FF_COLOR_FG_CYAN,
+        .colorTitle = FF_COLOR_FG_CYAN,
+    },
+    #endif
+    #ifdef FASTFETCH_DATATEXT_LOGO_ARTIX3
+    // Artix3
+    {
+        .names = { "artix3" },
+        .lines = FASTFETCH_DATATEXT_LOGO_ARTIX3,
         .colors = {
             FF_COLOR_FG_CYAN,
         },
@@ -811,6 +854,25 @@ static const FFlogo A[] = {
         },
         .colorKeys = FF_COLOR_FG_RED,
         .colorTitle = FF_COLOR_FG_DEFAULT,
+    },
+    #endif
+    #ifdef FASTFETCH_DATATEXT_LOGO_ASTROS
+    // AstrOS
+    {
+        .names = { "AstrOS" },
+        .lines = FASTFETCH_DATATEXT_LOGO_ASTROS,
+        .colors = {
+            FF_COLOR_FG_RGB "54;19;170",
+            FF_COLOR_FG_RGB "73;32;182",
+            FF_COLOR_FG_RGB "91;46;193",
+            FF_COLOR_FG_RGB "110;59;205",
+            FF_COLOR_FG_RGB "129;73;216",
+            FF_COLOR_FG_RGB "148;86;228",
+            FF_COLOR_FG_RGB "166;100;239",
+            FF_COLOR_FG_RGB "185;113;251",
+        },
+        .colorKeys = FF_COLOR_FG_RGB "148;86;228",
+        .colorTitle = FF_COLOR_FG_RGB "185;113;251",
     },
     #endif
     #ifdef FASTFETCH_DATATEXT_LOGO_JANUSLINUX

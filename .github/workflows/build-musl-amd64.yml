@@ -11,7 +11,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -24,12 +24,12 @@ jobs:
         run: |
           cat /etc/alpine-release
           uname -a
-          apk add cmake samurai vulkan-loader-dev libxcb-dev libxrandr-dev rpm-dev wayland-dev libdrm-dev dconf-dev imagemagick-dev chafa-dev zlib-dev dbus-dev mesa-dev opencl-dev sqlite-dev networkmanager-dev pulseaudio-dev ddcutil-dev elfutils-dev lua5.4-dev quickjs-ng-dev libvdpau-dev libva-dev gcc g++
+          apk add cmake samurai vulkan-loader-dev libxcb-dev libxrandr-dev rpm-dev wayland-dev libdrm-dev dconf-dev imagemagick-dev chafa-dev zlib-dev dbus-dev mesa-dev opencl-dev sqlite-dev networkmanager-dev elfutils-dev lua5.4-dev quickjs-ng-dev libvdpau-dev libva-dev gcc g++
         shell: alpine.sh --root {0}
 
       - name: build
         run: |
-            cmake -DSET_TWEAK=Off -DBUILD_TESTS=On -DCMAKE_INSTALL_PREFIX=/usr -DIS_MUSL=ON -DENABLE_EMBEDDED_PCIIDS=On -DENABLE_EMBEDDED_AMDGPUIDS=On -GNinja .
+            cmake -DSET_TWEAK=Off -DBUILD_TESTS=On -DCMAKE_INSTALL_PREFIX=/usr -DIS_MUSL=ON -DENABLE_EMBEDDED_PCIIDS=On -DENABLE_EMBEDDED_AMDGPUIDS=On -DCMAKE_C_FLAGS="-fno-pie" -DCMAKE_EXE_LINKER_FLAGS="-no-pie" -GNinja .
             cmake --build . --target package --verbose -j4
         shell: alpine.sh {0}
 
@@ -44,7 +44,7 @@ jobs:
         shell: alpine.sh {0}
 
       - name: upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fastfetch-musl-amd64
           path: ./fastfetch-*.*

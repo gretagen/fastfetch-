@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "common/debug.h"
 #include "common/endian.h"
 #include "common/windows/registry.h"
 #include "common/windows/nt.h"
@@ -6,9 +7,172 @@
 #include "common/smbios.h"
 
 #include <windows.h>
+#include <winioctl.h>
 #include "common/windows/perflib_.h"
 #include "common/windows/nt.h"
+#include "common/time.h"
+#include "3rdparty/pawnio/pawnio_resource.h"
 #include <wchar.h>
+
+#if defined(__x86_64__)
+
+// The signed IntelMSR module is embedded as an RCDATA resource (see pawnio.rc).
+// It comes from PawnIO.Modules 0.2.12, LGPL-2.1-or-later; its source and license text
+// are shipped in src/3rdparty/pawnio/.
+
+    #define FF_PAWNIO_DEVICE_TYPE 41394
+    #define FF_PAWNIO_IOCTL_LOAD ((DWORD) CTL_CODE(FF_PAWNIO_DEVICE_TYPE, 0x821, METHOD_BUFFERED, FILE_ANY_ACCESS))
+    #define FF_PAWNIO_IOCTL_EXECUTE ((DWORD) CTL_CODE(FF_PAWNIO_DEVICE_TYPE, 0x841, METHOD_BUFFERED, FILE_ANY_ACCESS))
+    #define FF_PAWNIO_FN_NAME_LENGTH 32
+
+enum : uint32_t {
+    MSR_IA32_THERM_STATUS = 0x0000019c,
+    MSR_IA32_TEMPERATURE_TARGET = 0x000001a2,
+    MSR_TURBO_RATIO_LIMIT = 0x000001ad,
+    MSR_IA32_PACKAGE_THERM_STATUS = 0x000001b1,
+};
+
+// Open the driver directly so we can log the exact failure reason.
+static HANDLE pawnIoOpenDevice(void) {
+    const HANDLE handle = CreateFileW(L"\\\\.\\PawnIO", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        return handle;
+    }
+
+    #ifndef NDEBUG
+    const DWORD error = GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+        FF_DEBUG("PawnIO device not found; the driver is probably not installed");
+    } else if (error == ERROR_ACCESS_DENIED) {
+        FF_DEBUG("PawnIO device access denied; elevation is required");
+    } else {
+        FF_DEBUG("Failed to open PawnIO device: %s", ffDebugWin32Error(error));
+    }
+    #endif
+    return INVALID_HANDLE_VALUE;
+}
+
+static bool pawnIoLoadModule(HANDLE handle) {
+    const HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(FF_PAWNIO_INTEL_MSR_RC_ID), RT_RCDATA);
+    if (!resource) {
+        FF_DEBUG("PawnIO module resource not found: %s", ffDebugWin32Error(GetLastError()));
+        return false;
+    }
+
+    const HGLOBAL global = LoadResource(nullptr, resource);
+    if (!global) {
+        FF_DEBUG("LoadResource(PawnIO module) failed: %s", ffDebugWin32Error(GetLastError()));
+        return false;
+    }
+
+    const DWORD blobSize = SizeofResource(nullptr, resource);
+    const void* const blob = LockResource(global);
+    if (blobSize == 0 || !blob) {
+        FF_DEBUG("PawnIO module resource is empty");
+        return false;
+    }
+
+    DWORD bytesReturned = 0;
+    if (!DeviceIoControl(handle, FF_PAWNIO_IOCTL_LOAD, (void*) blob, blobSize, nullptr, 0, &bytesReturned, nullptr)) {
+        FF_DEBUG("PawnIO module load failed: %s", ffDebugWin32Error(GetLastError()));
+        return false;
+    }
+    return true;
+}
+
+static bool pawnIoExecute(HANDLE handle, const char* name, uint64_t msr, uint64_t* value) {
+    if (strlen(name) >= FF_PAWNIO_FN_NAME_LENGTH) {
+        return false;
+    }
+
+    char input[FF_PAWNIO_FN_NAME_LENGTH + sizeof(uint64_t)] = {};
+    memcpy(input, name, strlen(name));
+    memcpy(input + FF_PAWNIO_FN_NAME_LENGTH, &msr, sizeof(msr));
+
+    DWORD bytesReturned = 0;
+    if (!DeviceIoControl(handle, FF_PAWNIO_IOCTL_EXECUTE, input, sizeof(input), value, sizeof(*value), &bytesReturned, nullptr)) {
+        FF_DEBUG("PawnIO %s() failed: %s", name, ffDebugWin32Error(GetLastError()));
+        return false;
+    }
+    return bytesReturned == sizeof(*value);
+}
+
+static double pawnIoReadCoreTemp(HANDLE handle, uint16_t tjmax) {
+    KAFFINITY newMask = 0b11;
+    NTSTATUS status = NtSetInformationThread(NtCurrentThread(), ThreadAffinityMask, &newMask, sizeof(newMask));
+    if (!NT_SUCCESS(status)) {
+        FF_DEBUG("Failed to set thread affinity mask: %s", ffDebugNtError(status));
+    }
+
+    // Changing the affinity mask does not migrate an already running thread immediately.
+    ffTimeSleep(0);
+
+    uint64_t value = 0;
+    const bool success = pawnIoExecute(handle, "ioctl_read_msr", MSR_IA32_THERM_STATUS, &value);
+
+    if (!success || !(value & (UINT64_C(1) << 31))) {
+        return FF_CPU_TEMP_UNSET;
+    }
+
+    const uint32_t dts = (uint32_t) ((value >> 16) & 0x7f);
+    if (dts >= 0x7f) {
+        return FF_CPU_TEMP_UNSET;
+    }
+
+    return (double) tjmax - dts;
+}
+
+static bool detectTemperatureByPawnIo(HANDLE handle, const FFCPUResult* cpu, double* result) {
+    if (!ffStrbufEqualS(&cpu->vendor, "GenuineIntel")) {
+        return false;
+    }
+
+    uint64_t target = 0, package = 0;
+    if (!pawnIoExecute(handle, "ioctl_read_msr", MSR_IA32_TEMPERATURE_TARGET, &target) ||
+        !pawnIoExecute(handle, "ioctl_read_msr", MSR_IA32_PACKAGE_THERM_STATUS, &package)) {
+        return false;
+    }
+
+    uint16_t tjmax = (uint16_t) ((target >> 16) & 0xff);
+    if (tjmax < 40 || tjmax > 125) {
+        tjmax = 100;
+    }
+
+    double temperature = pawnIoReadCoreTemp(handle, tjmax);
+    if (temperature == FF_CPU_TEMP_UNSET && package & (UINT64_C(1) << 31)) {
+        const uint32_t dts = (uint32_t) ((package >> 16) & 0x7f);
+        if (dts < 0x7f) {
+            temperature = (double) tjmax - dts;
+        }
+    }
+
+    if (temperature == FF_CPU_TEMP_UNSET) {
+        return false;
+    }
+
+    *result = temperature;
+    FF_DEBUG("PawnIO CPU temperature: %.1f C (tjmax %u, core 0)", temperature, tjmax);
+    return true;
+}
+
+// IA32_TURBO_RATIO_LIMIT[7:0] is the 1-core P-core turbo ratio. Intel uses a 100 MHz bus clock.
+static bool detectFrequencyMaxByPawnIo(HANDLE handle, FFCPUResult* cpu) {
+    uint64_t value = 0;
+    if (!pawnIoExecute(handle, "ioctl_read_msr", MSR_TURBO_RATIO_LIMIT, &value)) {
+        return false;
+    }
+
+    const uint32_t ratio = (uint32_t) (value & 0xff);
+    if (ratio < 4 || ratio > 128) {
+        return false;
+    }
+
+    cpu->frequencyMax = ratio * 100;
+    FF_DEBUG("PawnIO CPU max frequency: %u MHz (MSR 0x1AD ratio %u)", cpu->frequencyMax, ratio);
+    return true;
+}
+
+#endif
 
 static inline void ffPerfCloseQueryHandle(HANDLE* phQuery) {
     if (*phQuery != nullptr) {
@@ -34,23 +198,30 @@ const char* detectThermalTemp(const FFCPUOptions* options, double* result) {
     };
 
     if (options->tempSensor.length > 0) {
-        if (!NT_SUCCESS(RtlUTF8ToUnicodeN(querySpec.Name, (ULONG) sizeof(querySpec.Name), nullptr, options->tempSensor.chars, (ULONG) options->tempSensor.length + 1))) {
+        NTSTATUS status = RtlUTF8ToUnicodeN(querySpec.Name, (ULONG) sizeof(querySpec.Name), nullptr, options->tempSensor.chars, (ULONG) options->tempSensor.length + 1);
+        if (!NT_SUCCESS(status)) {
+            FF_DEBUG("Invalid temp sensor string: %s", ffDebugNtStatus(status));
             return "Invalid temp sensor string";
         }
     }
 
     DWORD dataSize = 0;
-    if (PerfEnumerateCounterSetInstances(nullptr, &querySpec.Identifier.CounterSetGuid, nullptr, 0, &dataSize) != ERROR_NOT_ENOUGH_MEMORY) {
+    DWORD ret = PerfEnumerateCounterSetInstances(nullptr, &querySpec.Identifier.CounterSetGuid, nullptr, 0, &dataSize);
+    if (ret != ERROR_NOT_ENOUGH_MEMORY) {
+        FF_DEBUG("PerfEnumerateCounterSetInstances() failed: %s", ffDebugWin32Error(ret));
         return "PerfEnumerateCounterSetInstances() failed";
     }
 
     if (dataSize <= sizeof(PERF_INSTANCE_HEADER)) {
+        FF_DEBUG("No `Thermal Zone Information` instances found");
         return "No `Thermal Zone Information` instances found";
     }
 
     {
         FF_AUTO_FREE PERF_INSTANCE_HEADER* const pHead = malloc(dataSize);
-        if (PerfEnumerateCounterSetInstances(nullptr, &querySpec.Identifier.CounterSetGuid, pHead, dataSize, &dataSize) != ERROR_SUCCESS) {
+        ret = PerfEnumerateCounterSetInstances(nullptr, &querySpec.Identifier.CounterSetGuid, pHead, dataSize, &dataSize);
+        if (ret != ERROR_SUCCESS) {
+            FF_DEBUG("PerfEnumerateCounterSetInstances() failed to get instance headers: %s", ffDebugWin32Error(ret));
             return "PerfEnumerateCounterSetInstances() failed to get instance headers";
         }
 
@@ -70,6 +241,7 @@ const char* detectThermalTemp(const FFCPUOptions* options, double* result) {
 
         if (dataSize == 0) {
             if (options->tempSensor.length > 0) {
+                FF_DEBUG("Unable to find CPU sensor");
                 return "Unable to find CPU sensor";
             }
 
@@ -81,34 +253,45 @@ const char* detectThermalTemp(const FFCPUOptions* options, double* result) {
     [[gnu::cleanup(ffPerfCloseQueryHandle)]]
     HANDLE hQuery = nullptr;
 
-    if (PerfOpenQueryHandle(nullptr, &hQuery) != ERROR_SUCCESS) {
+    ret = PerfOpenQueryHandle(nullptr, &hQuery);
+    if (ret != ERROR_SUCCESS) {
+        FF_DEBUG("PerfOpenQueryHandle() failed: %s", ffDebugWin32Error(ret));
         return "PerfOpenQueryHandle() failed";
     }
 
-    if (PerfAddCounters(hQuery, &querySpec.Identifier, sizeof(querySpec)) != ERROR_SUCCESS) {
+    ret = PerfAddCounters(hQuery, &querySpec.Identifier, sizeof(querySpec));
+    if (ret != ERROR_SUCCESS) {
+        FF_DEBUG("PerfAddCounters() failed: %s", ffDebugWin32Error(ret));
         return "PerfAddCounters() failed";
     }
 
     if (querySpec.Identifier.Status != ERROR_SUCCESS) {
+        FF_DEBUG("PerfAddCounters() reports invalid identifier: %s", ffDebugWin32Error(querySpec.Identifier.Status));
         return "PerfAddCounters() reports invalid identifier";
     }
 
-    if (PerfQueryCounterData(hQuery, nullptr, 0, &dataSize) != ERROR_NOT_ENOUGH_MEMORY) {
+    ret = PerfQueryCounterData(hQuery, nullptr, 0, &dataSize);
+    if (ret != ERROR_NOT_ENOUGH_MEMORY) {
+        FF_DEBUG("PerfQueryCounterData(nullptr) failed: %s", ffDebugWin32Error(ret));
         return "PerfQueryCounterData(nullptr) failed";
     }
 
     if (dataSize <= sizeof(PERF_DATA_HEADER) + sizeof(PERF_COUNTER_HEADER)) { // PERF_ERROR_RETURN, should not happen
+        FF_DEBUG("instance doesn't exist");
         return "instance doesn't exist";
     }
 
     FF_AUTO_FREE PERF_DATA_HEADER* const pDataHeader = malloc(dataSize);
 
-    if (PerfQueryCounterData(hQuery, pDataHeader, dataSize, &dataSize) != ERROR_SUCCESS) {
+    ret = PerfQueryCounterData(hQuery, pDataHeader, dataSize, &dataSize);
+    if (ret != ERROR_SUCCESS) {
+        FF_DEBUG("PerfQueryCounterData(pDataHeader) failed: %s", ffDebugWin32Error(ret));
         return "PerfQueryCounterData(pDataHeader) failed";
     }
 
     PERF_COUNTER_HEADER* pCounterHeader = (PERF_COUNTER_HEADER*) (pDataHeader + 1);
     if (pCounterHeader->dwType != PERF_MULTIPLE_COUNTERS) {
+        FF_DEBUG("Invalid counter type");
         return "Invalid counter type";
     }
 
@@ -190,18 +373,21 @@ static_assert(offsetof(FFSmbiosProcessorInfo, ThreadEnabled) == 0x30,
 static const char* detectMaxSpeedBySmbios(FFCPUResult* cpu) {
     const FFSmbiosHeaderTable* smbiosTable = ffGetSmbiosHeaderTable();
     if (!smbiosTable) {
+        FF_DEBUG("Failed to get SMBIOS data");
         return "Failed to get SMBIOS data";
     }
 
     const FFSmbiosProcessorInfo* data = (const FFSmbiosProcessorInfo*) (*smbiosTable)[FF_SMBIOS_TYPE_PROCESSOR_INFO];
 
     if (!data) {
+        FF_DEBUG("Processor information is not found in SMBIOS data");
         return "Processor information is not found in SMBIOS data";
     }
 
     while (data->ProcessorType != 0x03 /*Central Processor*/ || (data->Status & 0b00000111) != 1 /*Enabled*/) {
         data = (const FFSmbiosProcessorInfo*) ffSmbiosNextEntry(&data->Header);
         if (data->Header.Type != FF_SMBIOS_TYPE_PROCESSOR_INFO) {
+            FF_DEBUG("No active CPU is found in SMBIOS data");
             return "No active CPU is found in SMBIOS data";
         }
     }
@@ -209,6 +395,7 @@ static const char* detectMaxSpeedBySmbios(FFCPUResult* cpu) {
     uint32_t speed = FF_READ_LE(data->MaxSpeed);
     // Sometimes SMBIOS reports invalid value. We assume that max speed is small than 2x of base
     if (speed < cpu->frequencyBase || speed > cpu->frequencyBase * 2) {
+        FF_DEBUG("Possible invalid CPU max speed in SMBIOS data. See #800");
         return "Possible invalid CPU max speed in SMBIOS data. See #800";
     }
 
@@ -236,13 +423,16 @@ static const char* detectNCores(const FFCPUOptions* options, FFCPUResult* cpu) {
     ULONG length = 0;
     NtQuerySystemInformationEx(SystemLogicalProcessorAndGroupInformation, &lpr, sizeof(lpr), nullptr, 0, &length);
     if (length == 0) {
+        FF_DEBUG("GetLogicalProcessorInformationEx(RelationAll, nullptr, &length) failed");
         return "GetLogicalProcessorInformationEx(RelationAll, nullptr, &length) failed";
     }
 
     FF_AUTO_FREE SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*
         pProcessorInfo = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) malloc(length);
 
-    if (!NT_SUCCESS(NtQuerySystemInformationEx(SystemLogicalProcessorAndGroupInformation, &lpr, sizeof(lpr), pProcessorInfo, length, &length))) {
+    NTSTATUS status = NtQuerySystemInformationEx(SystemLogicalProcessorAndGroupInformation, &lpr, sizeof(lpr), pProcessorInfo, length, &length);
+    if (!NT_SUCCESS(status)) {
+        FF_DEBUG("GetLogicalProcessorInformationEx(RelationAll, pProcessorInfo, &length) failed: %s", ffDebugNtStatus(status));
         return "GetLogicalProcessorInformationEx(RelationAll, pProcessorInfo, &length) failed";
     }
 
@@ -283,6 +473,7 @@ static const char* detectNCores(const FFCPUOptions* options, FFCPUResult* cpu) {
 static const char* detectByRegistry(FFCPUResult* cpu) {
     FF_AUTO_CLOSE_FD HANDLE hKey = nullptr;
     if (!ffRegOpenKeyForRead(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", &hKey, nullptr)) {
+        FF_DEBUG("ffRegOpenKeyForRead() failed for HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0");
         return "ffRegOpenKeyForRead(HKEY_LOCAL_MACHINE, L\"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0\", &hKey, nullptr) failed";
     }
 
@@ -294,6 +485,7 @@ static const char* detectByRegistry(FFCPUResult* cpu) {
             nullptr)) {
         ffStrbufTrimRightSpace(&cpu->vendor);
     } else {
+        FF_DEBUG("ffRegReadValues() failed for CPU registry key");
         return "ffRegReadValues() failed for CPU registry key";
     }
 
@@ -314,7 +506,20 @@ const char* ffDetectCPUImpl(const FFCPUOptions* options, FFCPUResult* cpu) {
         detectMaxSpeedBySmbios(cpu);
     }
 
-    if (options->temp) {
+    bool pawnIoTemperature = false;
+#ifdef __x86_64__
+    if (ffStrbufEqualS(&cpu->vendor, "GenuineIntel")) {
+        FF_AUTO_CLOSE_FD HANDLE hPawnIo = pawnIoOpenDevice();
+        if (hPawnIo != INVALID_HANDLE_VALUE && pawnIoLoadModule(hPawnIo)) {
+            detectFrequencyMaxByPawnIo(hPawnIo, cpu);
+            if (options->temp) {
+                pawnIoTemperature = detectTemperatureByPawnIo(hPawnIo, cpu, &cpu->temperature);
+            }
+        }
+    }
+#endif
+
+    if (options->temp && !pawnIoTemperature) {
         detectThermalTemp(options, &cpu->temperature);
     }
 

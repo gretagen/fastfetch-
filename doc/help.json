@@ -176,7 +176,7 @@
             "short": "l",
             "long": "logo",
             "desc": "Set the logo source. Use \"none\" to disable logo output",
-            "remark": "Use either a built-in logo name or a path to an image file. See also https://github.com/fastfetch-cli/fastfetch/wiki/Logo-options",
+            "remark": "Use either a built-in logo name or a path to an image file. Environment variables and glob patterns are expanded; if several files match a glob, one is selected randomly. See also https://github.com/fastfetch-cli/fastfetch/wiki/Logo-options",
             "arg": {
                 "type": "logo"
             }
@@ -195,6 +195,7 @@
                     "file-raw": "Text file, printed as is",
                     "data": "Text data, printed with color code replacement",
                     "data-raw": "Text data, printed as is",
+                    "command-raw": "Command to run, whose output is printed as is",
                     "sixel": "Image file, rendered as sixel",
                     "kitty": "Image file, rendered using the Kitty graphics protocol",
                     "kitty-direct": "Image file, tells the terminal emulator to read image data from the specified file",
@@ -202,8 +203,45 @@
                     "iterm": "Image file, rendered using the iTerm graphics protocol",
                     "chafa": "Image file, printed as ASCII art using libchafa",
                     "raw": "Image file, printed as raw binary string",
+                    "spin": "Built-in logo (or a text file) drawn as a 3D slab; it turns one step per refresh with `--watch`",
                     "none": "Disable logo printing"
                 }
+            }
+        },
+        {
+            "long": "logo-spin-speed-per-frame",
+            "desc": "Set how far the spin logo turns per drawn frame, in degrees",
+            "remark": "Only used by `--logo-type spin`. One revolution takes 360 divided by this value frames, so `--watch` sets the pace; negative turns the other way. 0 means not set, and the default is 10",
+            "arg": {
+                "type": "num",
+                "default": 10
+            }
+        },
+        {
+            "long": "logo-spin-speed-per-round",
+            "desc": "Set how many seconds one revolution of the spin logo takes",
+            "remark": "Only used by `--logo-type spin`. Read from the clock, so a slow refresh turns further instead of slowing the logo down; negative turns the other way. 0 means not set, and this wins over `--logo-spin-speed-per-frame` when both are given",
+            "arg": {
+                "type": "num",
+                "default": 0
+            }
+        },
+        {
+            "long": "logo-spin-tilt",
+            "desc": "Set the camera tilt of the spin logo, in degrees",
+            "remark": "Only used by `--logo-type spin`",
+            "arg": {
+                "type": "num",
+                "default": 0
+            }
+        },
+        {
+            "long": "logo-spin-angle",
+            "desc": "Set the rotation of the first spin logo frame, in degrees",
+            "remark": "Only used by `--logo-type spin`. Without `--watch` the logo is drawn at this angle and stays there. 360 is the same as 0",
+            "arg": {
+                "type": "num",
+                "default": 0
             }
         },
         {
@@ -270,6 +308,14 @@
             }
         },
         {
+            "long": "logo-padding-bottom",
+            "desc": "Set the padding at the bottom of the logo",
+            "remark": "Only used with \"--logo-position top\"",
+            "arg": {
+                "type": "num"
+            }
+        },
+        {
             "long": "logo-print-remaining",
             "desc": "Specify whether to print remaining logo lines when the logo is taller than the module list",
             "arg": {
@@ -284,6 +330,7 @@
             "arg": {
                 "type": "enum",
                 "enum": {
+                    "auto": "Automatically choose left or top based on terminal width",
                     "left": "Left",
                     "top": "Top",
                     "right": "Right"
@@ -291,12 +338,33 @@
             }
         },
         {
-            "long": "logo-recache",
-            "desc": "If true, regenerate the image logo cache",
+            "long": "logo-cache",
+            "desc": "Specify how the image logo cache is used",
+            "remark": "See \"--help logo-animation-frame\" for the one case where a cached rendering can outlive the image type that produced it",
             "arg": {
-                "type": "bool",
+                "type": "enum",
                 "optional": true,
-                "default": false
+                "default": "true",
+                "enum": {
+                    "true": "Reuse a cached rendering when it is valid, and write it back on a cache miss",
+                    "false": "Ignore the image logo cache completely: neither read nor write it",
+                    "regen": "Ignore any existing cached rendering and regenerate it"
+                }
+            }
+        },
+        {
+            "long": "logo-animation-frame",
+            "desc": "Select which frame of an animated image logo to render",
+            "remark": [
+                "Animated kitty graphics only, and only if the image source is animated; 1 or higher renders that frame as a still image, 0 plays the animation",
+                "A selected frame is cached exactly like the first frame is, sharing its entries; the frame number is recorded next to them, so changing this option re-renders",
+                "That record is per cache directory, not per image type: switching --logo-type between two types that both have a cached rendering here, and asking for a different frame, can pair one type's rendering with the other's frame number",
+                "Run \"--logo-cache regen\" after such a switch"
+            ],
+            "arg": {
+                "type": "num",
+                "optional": true,
+                "default": 1
             }
         },
         {
@@ -599,6 +667,7 @@
                     "cs": "Czech",
                     "de": "German",
                     "es": "Spanish",
+                    "fi": "Finnish",
                     "fr": "French",
                     "gl": "Galician",
                     "he": "Hebrew",

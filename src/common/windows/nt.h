@@ -66,7 +66,10 @@ typedef struct _PROCESS_DEVICEMAP_INFORMATION_EX {
 } PROCESS_DEVICEMAP_INFORMATION_EX, *PPROCESS_DEVICEMAP_INFORMATION_EX;
 
 #ifndef NtCurrentProcess
-    #define NtCurrentProcess() ((HANDLE) (LONG_PTR) - 1)
+    #define NtCurrentProcess() ((HANDLE) (LONG_PTR) -1)
+#endif
+#ifndef NtCurrentThread
+    #define NtCurrentThread() ((HANDLE) (LONG_PTR) -2)
 #endif
 
 typedef struct _CURDIR {
@@ -170,9 +173,6 @@ NTSTATUS NTAPI NtQuerySystemEnvironmentValueEx(
     _Inout_ PULONG BufferLength,
     _Out_opt_ PULONG Attributes // EFI_VARIABLE_*
 );
-
-NTSTATUS NTAPI RtlGUIDFromString(IN PCUNICODE_STRING GuidString, OUT GUID* Guid);
-NTSTATUS NTAPI RtlStringFromGUIDEx(IN const GUID* Guid, OUT PUNICODE_STRING GuidString, IN BOOLEAN AllocateGuidString);
 
 typedef struct _SYSTEM_SECUREBOOT_INFORMATION {
     BOOLEAN SecureBootEnabled;
@@ -722,6 +722,10 @@ static inline bool ffIsSystemBasicProcessInfoAvailable() { // Includes HandleCou
     return SharedUserData->NtBuildNumber >= 26200; // MSDN says it was added in 26100.4770; ntdoc says 25H2
 }
 
+static inline bool ffIsFileFsFullSizeInformationExAvailable() {
+    return SharedUserData->NtBuildNumber >= 17763; // Windows 10 October 2018 Update (1809, REDSTONE5)
+}
+
 NTSYSAPI NTSTATUS NTAPI NtOpenProcessToken(
     _In_ HANDLE ProcessHandle,
     _In_ ACCESS_MASK DesiredAccess,
@@ -776,6 +780,9 @@ NTSYSAPI NTSTATUS NTAPI RtlUTF8ToUnicodeN(
     _Out_opt_ PULONG UnicodeStringActualByteCount,
     _In_reads_bytes_(UTF8StringByteCount) PCCH UTF8StringSource,
     _In_ ULONG UTF8StringByteCount);
+
+NTSYSAPI WCHAR NTAPI RtlUpcaseUnicodeChar(
+    _In_ WCHAR SourceCharacter);
 
 #define RTL_MAX_DRIVE_LETTERS 32
 typedef struct _RTL_DRIVE_LETTER_CURDIR {
@@ -1307,19 +1314,23 @@ typedef struct _KEY_BASIC_INFORMATION {
     _Field_size_bytes_(NameLength) WCHAR Name[]; // The name of the registry key. This string is not null-terminated.
 } KEY_BASIC_INFORMATION, *PKEY_BASIC_INFORMATION;
 
-typedef struct _KEY_FULL_INFORMATION {
-    LARGE_INTEGER LastWriteTime;
-    ULONG TitleIndex;
-    ULONG ClassOffset;
-    ULONG ClassLength;
-    ULONG SubKeys;
-    ULONG MaxNameLength;
-    ULONG MaxClassLength;
-    ULONG Values;
-    ULONG MaxValueNameLength;
-    ULONG MaxValueDataLength;
-    WCHAR Class[];
-} KEY_FULL_INFORMATION, *PKEY_FULL_INFORMATION;
+typedef struct _KEY_CACHED_INFORMATION {
+    LARGE_INTEGER LastWriteTime; // Number of 100-nanosecond intervals since this key or any of its values changed.
+    ULONG TitleIndex;            // Reserved // A legacy field originally intended for use with localization such as an index of a resource table.
+    ULONG SubKeys;               // The number of subkeys for a key.
+    ULONG MaxNameLen;            // The maximum length, in bytes, of a subkey name.
+    ULONG Values;                // The number of value entries.
+    ULONG MaxValueNameLen;       // The maximum length, in bytes, of a value entry name.
+    ULONG MaxValueDataLen;       // The maximum length, in bytes, of a value entry data field.
+    ULONG NameLength;            // Size, in bytes, of the key's own (leaf) name, without the terminator. The name itself is not stored.
+} KEY_CACHED_INFORMATION, *PKEY_CACHED_INFORMATION;
+// 36 bytes of members, but LARGE_INTEGER makes the struct 8-byte aligned, and that is exactly what
+// the kernel demands: a 36-byte buffer is rejected with STATUS_BUFFER_TOO_SMALL (measured).
+// The kernel writes all 40 bytes -- the 4 padding bytes included, zeroed -- and reports
+// ResultLength = 40 whatever size you pass, so a larger buffer buys nothing (measured 40..4096).
+// This is the only information class that never appends a string: NameLength is the length of the
+// key's own (leaf) name in bytes without the terminator, and the name itself is not returned.
+static_assert(sizeof(KEY_CACHED_INFORMATION) == 40, "KEY_CACHED_INFORMATION should be 40 bytes");
 
 NTSYSAPI NTSTATUS NTAPI NtQueryKey(
     _In_ HANDLE KeyHandle,
@@ -1418,3 +1429,23 @@ NTSYSAPI NTSTATUS NTAPI NtTerminateProcess(
 
 NTSYSAPI NTSTATUS NTAPI RtlAcquirePebLock(VOID);
 NTSYSAPI NTSTATUS NTAPI RtlReleasePebLock(VOID);
+
+typedef struct _FILE_FS_FULL_SIZE_INFORMATION_EX {
+    ULONGLONG ActualTotalAllocationUnits;
+    ULONGLONG ActualAvailableAllocationUnits;
+    ULONGLONG ActualPoolUnavailableAllocationUnits;
+    ULONGLONG CallerTotalAllocationUnits;
+    ULONGLONG CallerAvailableAllocationUnits;
+    ULONGLONG CallerPoolUnavailableAllocationUnits;
+    ULONGLONG UsedAllocationUnits;
+    ULONGLONG TotalReservedAllocationUnits;
+    ULONGLONG VolumeStorageReserveAllocationUnits;
+    ULONGLONG AvailableCommittedAllocationUnits;
+    ULONGLONG PoolAvailableAllocationUnits;
+    ULONG     SectorsPerAllocationUnit;
+    ULONG     BytesPerSector;
+} FILE_FS_FULL_SIZE_INFORMATION_EX, *PFILE_FS_FULL_SIZE_INFORMATION_EX;
+
+enum {
+    FileFsFullSizeInformationEx = 14
+};

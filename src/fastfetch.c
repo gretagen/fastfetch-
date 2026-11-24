@@ -2,6 +2,8 @@
 #include "common/ffdata.h"
 #include "detection/version/version.h"
 #include "logo/logo.h"
+#include "logo/spin/spin.h"
+#include "common/FFcache.h"
 #include "common/commandoption.h"
 #include "common/genconfig.h"
 #include "common/init.h"
@@ -70,6 +72,7 @@ static void printCommandFormatHelp(const char* command) {
                 printf("-- In config file: { \"type\": \"%s\", \"format\": \"{<format-variable>}\" }\n", type.chars);
                 printf("Sets the format string for %s output.\n", baseInfo->name);
                 puts("To see how a format string is constructed, take a look at https://github.com/fastfetch-cli/fastfetch/wiki/Format-String-Guide.");
+                puts("Descriptions which end with a '*' are available in key format too.");
                 puts("The following variables are passed:");
 
                 uint32_t maxWidth = 20;
@@ -600,7 +603,7 @@ static void enableJsonOutput(FFdata* data) {
 }
 
 static void genConfigCommon(FFdata* data, const char* value) {
-    if (!getenv("NO_COLOR") && isatty(STDOUT_FILENO) && isatty(STDIN_FILENO)
+    if (!getenv("NO_COLOR") && ffIsTerminal(STDOUT_FILENO) && ffIsTerminal(STDIN_FILENO)
         #ifdef _WIN32
             && ffIsWindows10OrGreater()
         #endif
@@ -689,7 +692,7 @@ static void parseCommand(FFdata* data, char* key, char* value) {
             enableJsonOutput(data);
         }
     } else if (ffStrEqualsIgnCase(key, "--dynamic-interval")) {
-        instance.state.dynamicInterval = ffOptionParseUInt32(key, value); // seconds to milliseconds
+        instance.state.dynamicInterval = ffOptionParseUInt32(key, value); // ms
     } else if (ffStrEqualsIgnCase(key, "-w") || ffStrEqualsIgnCase(key, "--watch")) {
         if (value == nullptr) {
             instance.state.dynamicInterval = 1000; // default to 1 second if no value is provided
@@ -752,6 +755,12 @@ static void parseConfigFiles(FFdata* data) {
     }
 }
 
+// `-30`, `-.5`: a negative number is the value of the previous option, not the
+// name of the next one (`--logo-spin-tilt -30`).
+static bool isNegativeNumber(const char* str) {
+    return str[0] == '-' && (isdigit((unsigned char) str[1]) || (str[1] == '.' && isdigit((unsigned char) str[2])));
+}
+
 static void parseArguments(FFdata* data, int argc, char** argv, void (*parser)(FFdata* data, char* key, char* value)) {
     for (int i = 1; i < argc; i++) {
         const char* key = argv[i];
@@ -766,6 +775,7 @@ static void parseArguments(FFdata* data, int argc, char** argv, void (*parser)(F
 
         if (i == argc - 1 || (argv[i + 1][0] == '-' && argv[i + 1][1] != '\0' &&    // `-` is used as an alias for `/dev/stdin`
                                  !ffStrEqualsIgnCase(argv[i], "--separator-string") // Separator string can start with a -
+                                 && !isNegativeNumber(argv[i + 1]) // A negative number is a value
                                  )) {
             parser(data, argv[i], nullptr);
         } else {
@@ -814,6 +824,13 @@ static void run(FFdata* data) {
             ffTimeSleep(instance.state.dynamicInterval);
             fputs("\e[H", stdout); // Move cursor to the top left corner to overwrite the previous output
             instance.state.keysHeight = 0; // Reset keysHeight so `ffLogoPrintRemaining` will recalculate it
+            ffCacheInvalidateAll(); // Drop the detection results cached for the previous round, so that this round re-detects them
+            // `--logo-type spin`: one rotation step per refresh, so the logo turns in sync with
+            // the modules instead of owning a timer of its own. A still logo, or any other logo
+            // type, costs a single `false` here.
+            if (ffSpinTick()) {
+                ffLogoPrint();
+            }
         } else {
             break;
         }
@@ -851,9 +868,16 @@ static void writeConfigFile(FFdata* data) {
     } else if (data->genConfigInteractive) {
         if (instance.config.logo.type == FF_LOGO_TYPE_NONE) {
             yyjson_mut_obj_add_null(doc, root, "logo");
-        } else if (instance.config.logo.type == FF_LOGO_TYPE_SMALL) {
+        } else if (instance.config.logo.type == FF_LOGO_TYPE_SMALL && instance.config.logo.position == FF_LOGO_POSITION_LEFT) {
+            yyjson_mut_obj_add_str(doc, root, "logo", "small");
+        } else if (instance.config.logo.position != FF_LOGO_POSITION_LEFT || instance.config.logo.type == FF_LOGO_TYPE_SMALL) {
             yyjson_mut_val* logo = yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_str(doc, logo, "type", "small");
+            if (instance.config.logo.type == FF_LOGO_TYPE_SMALL) {
+                yyjson_mut_obj_add_str(doc, logo, "type", "small");
+            }
+            if (instance.config.logo.position != FF_LOGO_POSITION_LEFT) {
+                yyjson_mut_obj_add_str(doc, logo, "position", ffLogoPositionToString(instance.config.logo.position));
+            }
             yyjson_mut_obj_add_val(doc, root, "logo", logo);
         }
     }

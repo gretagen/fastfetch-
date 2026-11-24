@@ -21,19 +21,41 @@ typedef enum FFLogoType: uint8_t {
     FF_LOGO_TYPE_IMAGE_ITERM,        // image file, printed as iterm graphics protocol
     FF_LOGO_TYPE_IMAGE_CHAFA,        // image file, printed as ascii art using libchafa
     FF_LOGO_TYPE_IMAGE_RAW,          // image file, printed as raw binary string
+    FF_LOGO_TYPE_SPIN,               // builtin logo (or a text file) drawn as a 3D slab, one turn step per `--watch` refresh
     FF_LOGO_TYPE_NONE,               // `--logo none`, but still applies colors to the system information output (unless `--pipe` is set)
 } FFLogoType;
+
+typedef struct FFOptionsLogoSpin {
+    float speedPerFrame; // degrees the logo turns per drawn frame; negative turns the other way, 0: not set
+    float speedPerRound; // seconds one revolution takes; negative turns the other way, 0: not set (wins over speedPerFrame)
+    float tilt;          // camera tilt in degrees
+    float angle;         // rotation of the first frame in degrees; drawn as is without `--watch`
+} FFOptionsLogoSpin;
 
 typedef enum FFLogoPosition: uint8_t {
     FF_LOGO_POSITION_LEFT,
     FF_LOGO_POSITION_TOP,
     FF_LOGO_POSITION_RIGHT,
+    FF_LOGO_POSITION_AUTO,
 } FFLogoPosition;
+
+typedef enum FFLogoCacheStrategy: uint8_t {
+    FF_LOGO_CACHE_ON,    // reuse a cached rendering when it is valid, and write it back on a cache miss
+    FF_LOGO_CACHE_OFF,   // ignore the image logo cache completely: neither read nor write it
+    FF_LOGO_CACHE_REGEN, // ignore any existing cached rendering and regenerate it
+} FFLogoCacheStrategy;
+
+// Which frame of the image source to render. 0 is the only value that prints an animation; the
+// others all produce a static image, which keeps the default (1, the first frame) byte-identical
+// to the behaviour before animations existed.
+#define FF_LOGO_ANIMATION_FRAME_FIRST 1
+#define FF_LOGO_ANIMATION_FRAME_ANIMATE 0
 
 typedef struct FFOptionsLogo {
     FFstrbuf source;
     FFLogoType type;
     FFLogoPosition position;
+    FFOptionsLogoSpin spin;
     FFstrbuf colors[FASTFETCH_LOGO_MAX_COLORS];
     uint32_t width;
     uint32_t height;
@@ -43,7 +65,11 @@ typedef struct FFOptionsLogo {
     uint32_t paddingBottom;
     bool printRemaining;
     bool preserveAspectRatio;
-    bool recache;
+    FFLogoCacheStrategy cache;
+    // 0 = animate, N > 0 = the N-th frame (1-based), N < 0 = the |N|-th frame from the end.
+    // Kept as given by the user: the cache entry name is built from it before the frame count
+    // is known, and negative values stay meaningful across runs (see image.c).
+    int32_t animationFrame;
 
 #if FF_HAVE_CHAFA
     bool chafaFgOnly;
@@ -54,6 +80,7 @@ typedef struct FFOptionsLogo {
 #endif
 } FFOptionsLogo;
 
+const char* ffLogoPositionToString(FFLogoPosition position);
 void ffOptionsInitLogo(FFOptionsLogo* options);
 bool ffOptionsParseLogoCommandLine(FFOptionsLogo* options, const char* key, const char* value);
 void ffOptionsDestroyLogo(FFOptionsLogo* options);

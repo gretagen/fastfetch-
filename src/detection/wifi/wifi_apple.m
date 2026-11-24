@@ -1,4 +1,5 @@
 #include "wifi.h"
+#include "common/percent.h"
 #include "common/processing.h"
 #include "common/strutil.h"
 #include "common/apple/cf_helpers.h"
@@ -6,11 +7,6 @@
 #import <CoreWLAN/CoreWLAN.h>
 #import <IOKit/IOKitLib.h>
 #import <IOKit/kext/KextManager.h>
-
-static inline double rssiToSignalQuality(int rssi) {
-    return (double) (rssi >= -50 ? 100 : rssi <= -100 ? 0
-                                                      : (rssi + 100) * 2);
-}
 
 @interface CWNetworkProfile ()
 @property (readonly, retain, nullable) NSArray<NSDictionary*>* bssidList;
@@ -56,15 +52,15 @@ const char* ffDetectWifi(FFlist* result) {
 
         if (inf.ssid) { // https://developer.apple.com/forums/thread/732431
             ffStrbufAppendS(&item->conn.ssid, inf.ssid.UTF8String);
-        } else if (networkProfile.ssid) {
-            ffStrbufSetStatic(&item->conn.ssid, inf.configuration.networkProfiles.firstObject.ssid.UTF8String);
+        } else if (networkProfile.ssid) { // Dead in macOS 27.2
+            ffStrbufSetStatic(&item->conn.ssid, networkProfile.ssid.UTF8String);
         } else {
-            ffStrbufSetStatic(&item->conn.ssid, "<redacted>"); // https://developer.apple.com/forums/thread/732431
+            ffStrbufSetStatic(&item->conn.ssid, "<redacted>");
         }
 
         if (inf.bssid) {
             ffStrbufAppendS(&item->conn.bssid, inf.bssid.UTF8String);
-        } else if (networkProfile.bssidList) {
+        } else if (networkProfile.bssidList) { // Dead in macOS 27.2
             ffStrbufSetStatic(&item->conn.bssid, [networkProfile.bssidList.firstObject[@"BSSID"] UTF8String]);
         } else {
             ffStrbufSetStatic(&item->conn.bssid, "<redacted>");
@@ -101,7 +97,7 @@ const char* ffDetectWifi(FFlist* result) {
                 }
                 break;
         }
-        item->conn.signalQuality = rssiToSignalQuality((int) inf.rssiValue);
+        item->conn.signalQuality = ffRssiToSignalQuality((int) inf.rssiValue);
         item->conn.txRate = inf.transmitRate;
 
         switch (inf.security) {

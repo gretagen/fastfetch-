@@ -49,7 +49,7 @@ bool ffPrintPlayer(FFPlayerOptions* options) {
 
     // If we don't have subdomains, it is usually more pretty to capitalize the first letter.
     if (playerPrettyIsCustom && ffStrbufFirstIndexC(&playerPretty, '.') == playerPretty.length) {
-        playerPretty.chars[0] = (char) toupper(playerPretty.chars[0]);
+        playerPretty.chars[0] = (char) toupper((unsigned char) playerPretty.chars[0]);
     }
 
     if (playerPrettyIsCustom) {
@@ -89,6 +89,7 @@ void ffParsePlayerJsonObject(FFPlayerOptions* options, yyjson_val* module) {
     }
 }
 
+[[gnu::cold]]
 void ffGeneratePlayerJsonConfig(FFPlayerOptions* options, yyjson_mut_doc* doc, yyjson_mut_val* module) {
     ffJsonConfigGenerateModuleArgsConfig(doc, module, &options->moduleArgs);
 }
@@ -115,6 +116,7 @@ FFModuleBaseInfo ffPlayerModuleInfo = {
         .cs = "Přehrávač médií",
         .de = "Medienplayer",
         .es = "Reproductor multimedia",
+        .fi = "Mediasoitin",
         .fr = "Lecteur multimédia",
         .gl = "Reprodutor multimedia",
         .he = "נגן מדיה",
@@ -143,5 +145,5 @@ FFModuleBaseInfo ffPlayerModuleInfo = {
         { "Player Identifier", "id" },
         { "URL name", "url" },
     })),
-    .defaultOrder = 46,
+    .defaultOrder = 47,
 };

@@ -124,7 +124,7 @@ const char* detectByOpenGL(FFlist* gpus) {
         gpu->coreCount = FF_GPU_CORE_COUNT_UNSET;
         gpu->frequency = FF_GPU_FREQUENCY_UNSET;
         gpu->coreUsage = FF_GPU_CORE_USAGE_UNSET;
-        gpu->dedicated = gpu->shared = (FFGPUMemory) { 0, 0 };
+        gpu->dedicated.total = gpu->dedicated.used = gpu->shared.total = gpu->shared.used = FF_GPU_VMEM_SIZE_UNSET;
         gpu->deviceId = 0;
         gpu->pcieSpeed = FF_GPU_PCIE_SPEED_UNSET;
 
@@ -341,7 +341,7 @@ bool ffGPUDetectTypeByVendorAndName(FFGPUResult* gpu) {
     } else if (gpu->vendor.chars == FF_GPU_VENDOR_NAME_INTEL) {
         // 0000:00:02.0 is reserved for Intel integrated graphics
         gpu->type = gpu->deviceId == ffGPUPciAddr2Id(0, 0, 2, 0) ? FF_GPU_TYPE_INTEGRATED : FF_GPU_TYPE_DISCRETE;
-    } else if (gpu->vendor.chars == FF_GPU_VENDOR_NAME_VMWARE || gpu->vendor.chars == FF_GPU_VENDOR_NAME_PARALLELS) {
+    } else if (gpu->vendor.chars == FF_GPU_VENDOR_NAME_VMWARE || gpu->vendor.chars == FF_GPU_VENDOR_NAME_PARALLELS || gpu->vendor.chars == FF_GPU_VENDOR_NAME_REDHAT) {
         // Virtualized GPUs
         gpu->type = FF_GPU_TYPE_INTEGRATED;
     }
